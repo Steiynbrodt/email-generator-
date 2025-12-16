@@ -1,31 +1,59 @@
-# .github/workflows/build.yml
-name: Build and Release
+# Drop-in manual release workflow tuned to your current artifact layout.
+# Matches behavior/asset layout of .github/workflows/build.yml (ref: dc9664545a26360973415fbcfc9ca001970949f6)
+# https://github.com/Steiynbrodt/email-generator-/blob/dc9664545a26360973415fbcfc9ca001970949f6/.github/workflows/build.yml
+
+name: Manual Build and Release
 
 on:
-  push:
-    tags: ['v*']  # Trigger on git tags like v1.0.0
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: 'Tag to create (e.g. v1.0.0)'
+        required: true
+      release_name:
+        description: 'Release display name (optional)'
+        required: false
+        default: ''
+      overwrite_release:
+        description: 'If true, delete existing release with the same tag before creating (CAREFUL)'
+        required: false
+        default: 'false'
+      draft:
+        description: 'Create release as draft? (true/false)'
+        required: false
+        default: 'false'
+      prerelease:
+        description: 'Create release as prerelease? (true/false)'
+        required: false
+        default: 'false'
+
+env:
+  MAIN_PY_FILE: generator.py
 
 jobs:
   build:
+    name: Build artifacts
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [windows-latest, ubuntu-latest]
-    env:
-      MAIN_PY_FILE: generator.py
 
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
       - name: Install dependencies
         run: |
           pip install pyinstaller
+
       - name: Build executable
         run: |
           pyinstaller --onefile ${{ env.MAIN_PY_FILE }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
@@ -33,20 +61,24 @@ jobs:
           path: dist/
 
   release:
+    name: Create Release and Upload Assets
     needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
+
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           merge-multiple: true
 
-      - name: List workspace (for debugging)
+      - name: List workspace (debug)
         run: |
           echo "Workspace root: $GITHUB_WORKSPACE"
           ls -la
+          # show dist contents if present
+          find . -maxdepth 3 -type f -print || true
 
       - name: Prepare release assets
         id: prepare_assets
@@ -64,7 +96,7 @@ jobs:
             echo "windows_asset=" >> $GITHUB_OUTPUT
           fi
 
-          # Find first Linux executable in dist (exclude libraries)
+          # Find first Linux executable (executable permission, exclude libs)
           LINUX_BIN=$(find . -type f -perm -111 -not -name "*.so" -not -name "*.dll" -not -name "*.dylib" -print -quit || true)
           if [ -n "$LINUX_BIN" ]; then
             echo "Found Linux binary: $LINUX_BIN"
@@ -75,16 +107,44 @@ jobs:
             echo "linux_asset=" >> $GITHUB_OUTPUT
           fi
 
+      - name: Delete existing release (if requested)
+        if: ${{ github.event.inputs.overwrite_release == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          OWNER=${GITHUB_REPOSITORY%%/*}
+          REPO=${GITHUB_REPOSITORY#*/}
+          TAG="${{ github.event.inputs.tag_name }}"
+
+          echo "Checking for existing release for tag: $TAG"
+          resp=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$OWNER/$REPO/releases/tags/$TAG")
+          if echo "$resp" | grep -q '"id":'; then
+            id=$(echo "$resp" | sed -n 's/.*"id": \([0-9]*\).*/\1/p')
+            if [ -n "$id" ]; then
+              echo "Deleting release id $id for tag $TAG"
+              curl -s -X DELETE -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$OWNER/$REPO/releases/$id"
+              echo "Deleted release id $id"
+            else
+              echo "Could not parse release id, response:"
+              echo "$resp"
+              exit 1
+            fi
+          else
+            echo "No release exists for tag $TAG"
+          fi
+
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.ref_name }}
-          release_name: Release ${{ github.ref_name }}
-          draft: false
-          prerelease: false
+          tag_name: ${{ github.event.inputs.tag_name }}
+          # If user provided a release_name it will be used; otherwise use "Release <tag>"
+          release_name: ${{ github.event.inputs.release_name && github.event.inputs.release_name || format('Release {0}', github.event.inputs.tag_name) }}
+          draft: ${{ github.event.inputs.draft }}
+          prerelease: ${{ github.event.inputs.prerelease }}
 
       - name: Upload Windows EXE (if present)
         if: ${{ steps.prepare_assets.outputs.windows_asset != '' }}
