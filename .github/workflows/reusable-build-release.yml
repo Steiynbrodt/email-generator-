@@ -1,0 +1,202 @@
+name: Reusable Build and Release
+
+on:
+  workflow_call:
+    inputs:
+      tag_name:
+        description: "Tag to create (e.g. v1.0.0)"
+        required: true
+        type: string
+      release_name:
+        description: "Release display name (optional)"
+        required: false
+        type: string
+        default: ""
+      overwrite_release:
+        description: "If true, delete existing release with the same tag before creating (CAREFUL)"
+        required: false
+        type: string
+        default: "true"
+      draft:
+        description: "Create release as draft? (true/false)"
+        required: false
+        type: string
+        default: "false"
+      prerelease:
+        description: "Create release as prerelease? (true/false)"
+        required: false
+        type: string
+        default: "false"
+      main_py_file:
+        description: "Main python file to package"
+        required: false
+        type: string
+        default: "generator.py"
+      python_version:
+        description: "Python version"
+        required: false
+        type: string
+        default: "3.10"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build artifacts (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python_version }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+
+      - name: Build executable (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          pyinstaller --onefile "${{ inputs.main_py_file }}"
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          $exe = Get-ChildItem -Path "dist" -Filter "*.exe" | Select-Object -First 1
+          if (-not $exe) { throw "No .exe produced in dist/" }
+          Copy-Item $exe.FullName "out\app-windows.exe" -Force
+
+      - name: Build executable (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          pyinstaller --onefile "${{ inputs.main_py_file }}"
+          mkdir -p out
+          APP_NAME="$(basename "${{ inputs.main_py_file }}" .py)"
+          if [ ! -f "dist/$APP_NAME" ]; then
+            echo "Expected dist/$APP_NAME not found. dist contains:"
+            ls -la dist || true
+            exit 1
+          fi
+          cp "dist/$APP_NAME" "out/app-linux"
+          chmod +x "out/app-linux"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-${{ runner.os }}
+          path: out/
+
+  release:
+    name: Create Release and Upload Assets
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      # IMPORTANT: gh release create will fail without a git repo unless --repo is always used.
+      # We do BOTH: checkout + --repo for robustness.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: ./downloaded
+
+      - name: Prepare release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release_assets
+
+          if [ -f "./downloaded/app-windows.exe" ]; then
+            cp "./downloaded/app-windows.exe" "release_assets/app-windows.exe"
+          else
+            echo "Windows EXE not found in downloaded/ (ok if Windows build failed)"
+          fi
+
+          if [ -f "./downloaded/app-linux" ]; then
+            cp "./downloaded/app-linux" "release_assets/app-linux"
+            chmod +x "release_assets/app-linux"
+          else
+            echo "Linux binary not found in downloaded/ (ok if Linux build failed)"
+          fi
+
+          echo "Prepared assets:"
+          ls -la release_assets || true
+
+      - name: Create SHA256SUMS.txt
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(release_assets/*)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No assets in release_assets/; refusing to create an empty release."
+            exit 1
+          fi
+
+          # Create checksums for all assets currently in release_assets/
+          (cd release_assets && sha256sum * | LC_ALL=C sort) > release_assets/SHA256SUMS.txt
+
+          echo "SHA256SUMS.txt:"
+          cat release_assets/SHA256SUMS.txt
+
+      - name: Delete existing release (if requested)
+        if: ${{ inputs.overwrite_release == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag_name }}"
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Deleting existing release for tag $TAG"
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
+          else
+            echo "No existing release for tag $TAG"
+          fi
+
+      - name: Create release + upload assets (including SHA256SUMS.txt)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ inputs.tag_name }}"
+          TITLE_INPUT="${{ inputs.release_name }}"
+          DRAFT="${{ inputs.draft }}"
+          PRERELEASE="${{ inputs.prerelease }}"
+
+          if [ -n "$TITLE_INPUT" ]; then
+            TITLE="$TITLE_INPUT"
+          else
+            TITLE="Release $TAG"
+          fi
+
+          FLAGS=()
+          if [ "$DRAFT" = "true" ]; then FLAGS+=(--draft); fi
+          if [ "$PRERELEASE" = "true" ]; then FLAGS+=(--prerelease); fi
+
+          shopt -s nullglob
+          ASSETS=(release_assets/*)
+          if [ ${#ASSETS[@]} -eq 0 ]; then
+            echo "No assets found in release_assets/. Nothing to upload."
+            exit 1
+          fi
+
+          gh release create "$TAG" "${ASSETS[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TITLE" \
+            --notes "" \
+            "${FLAGS[@]}"
