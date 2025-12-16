@@ -22,146 +22,27 @@ on:
         description: "Create release as prerelease? (true/false)"
         required: false
         default: "false"
+      main_py_file:
+        description: "Main python file to package"
+        required: false
+        default: "generator.py"
+      python_version:
+        description: "Python version"
+        required: false
+        default: "3.10"
 
 permissions:
   contents: write
 
-env:
-  MAIN_PY_FILE: generator.py
-
 jobs:
-  build:
-    name: Build artifacts (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [windows-latest, ubuntu-latest]
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install pyinstaller
-
-      - name: Build executable (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          pyinstaller --onefile $env:MAIN_PY_FILE
-          New-Item -ItemType Directory -Force -Path out | Out-Null
-          Copy-Item "dist\*.exe" "out\app-windows.exe"
-
-      - name: Build executable (Linux)
-        if: runner.os == 'Linux'
-        shell: bash
-        run: |
-          pyinstaller --onefile "$MAIN_PY_FILE"
-          mkdir -p out
-          # PyInstaller outputs "dist/<name>" where <name> is script basename
-          APP_NAME="$(basename "$MAIN_PY_FILE" .py)"
-          cp "dist/$APP_NAME" "out/app-linux"
-          chmod +x "out/app-linux"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-${{ runner.os }}
-          path: out/
-
-  release:
-    name: Create Release and Upload Assets
-    needs: build
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          merge-multiple: true
-          path: ./downloaded
-
-      - name: List downloaded files (debug)
-        shell: bash
-        run: |
-          set -e
-          echo "Downloaded:"
-          find ./downloaded -type f -maxdepth 2 -print
-
-      - name: Prepare release assets
-        shell: bash
-        run: |
-          set -e
-          mkdir -p release_assets
-
-          # Copy known outputs if present
-          if [ -f "./downloaded/app-windows.exe" ]; then
-            cp "./downloaded/app-windows.exe" "release_assets/app-windows.exe"
-          fi
-
-          if [ -f "./downloaded/app-linux" ]; then
-            cp "./downloaded/app-linux" "release_assets/app-linux"
-            chmod +x "release_assets/app-linux"
-          fi
-
-          echo "Prepared assets:"
-          ls -la release_assets || true
-
-      - name: Delete existing release (if requested)
-        if: ${{ github.event.inputs.overwrite_release == 'true' }}
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -e
-          TAG="${{ github.event.inputs.tag_name }}"
-
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "Deleting existing release for tag $TAG"
-            # --cleanup-tag removes the Git tag as well
-            gh release delete "$TAG" --yes --cleanup-tag
-          else
-            echo "No existing release for tag $TAG"
-          fi
-
-      - name: Create release + upload assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
-        run: |
-          set -e
-          TAG="${{ github.event.inputs.tag_name }}"
-          TITLE_INPUT="${{ github.event.inputs.release_name }}"
-          DRAFT="${{ github.event.inputs.draft }}"
-          PRERELEASE="${{ github.event.inputs.prerelease }}"
-
-          if [ -n "$TITLE_INPUT" ]; then
-            TITLE="$TITLE_INPUT"
-          else
-            TITLE="Release $TAG"
-          fi
-
-          FLAGS=()
-          if [ "$DRAFT" = "true" ]; then FLAGS+=(--draft); fi
-          if [ "$PRERELEASE" = "true" ]; then FLAGS+=(--prerelease); fi
-
-          # Create release and upload everything in release_assets/
-          # If the directory is empty, fail early with a clear message.
-          shopt -s nullglob
-          ASSETS=(release_assets/*)
-          if [ ${#ASSETS[@]} -eq 0 ]; then
-            echo "No assets found in release_assets/. Nothing to upload."
-            exit 1
-          fi
-
-          gh release create "$TAG" "${ASSETS[@]}" \
-            --title "$TITLE" \
-            --notes "" \
-            "${FLAGS[@]}"
+  build_and_release:
+    uses: ./.github/workflows/reusable-build-release.yml
+    with:
+      tag_name: ${{ inputs.tag_name }}
+      release_name: ${{ inputs.release_name }}
+      overwrite_release: ${{ inputs.overwrite_release }}
+      draft: ${{ inputs.draft }}
+      prerelease: ${{ inputs.prerelease }}
+      main_py_file: ${{ inputs.main_py_file }}
+      python_version: ${{ inputs.python_version }}
+    secrets: inherit
