@@ -1,9 +1,11 @@
-# .github/workflows/build.yml
 name: Build and Release
 
 on:
   push:
     tags: ['v*']  # Trigger on git tags like v1.0.0
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -22,7 +24,6 @@ jobs:
           python-version: '3.10'
       - name: Install dependencies
         run: |
-          
           pip install pyinstaller
       - name: Build executable
         run: |
@@ -41,31 +42,68 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+
+      - name: Collect built artifacts
+        id: collect
+        run: |
+          set -euo pipefail
+          mkdir -p release_assets
+
+          # PyInstaller by default produces dist/<name> (Linux) and dist/<name>.exe (Windows)
+          win=$(find . -type f -path "*/dist/*.exe" -name "generator.exe" -print -quit || true)
+          if [ -n "$win" ]; then cp "$win" release_assets/generator.exe; fi
+
+          linux=$(find . -type f -path "*/dist/*" -name "generator" -print -quit || true)
+          if [ -n "$linux" ]; then cp "$linux" release_assets/generator; fi
+
+          # Fallback: any .exe or executable if not found above
+          if [ -z "$(ls -A release_assets 2>/dev/null)" ]; then
+            win2=$(find . -type f -iname "*.exe" -print -quit || true)
+            if [ -n "$win2" ]; then cp "$win2" release_assets/generator.exe || true; fi
+            bin2=$(find . -type f -perm /111 -not -iname "*.exe" -print -quit || true)
+            if [ -n "$bin2" ]; then cp "$bin2" release_assets/generator || true; fi
+          fi
+
+          ls -la release_assets || true
+
+          if [ -f release_assets/generator.exe ]; then
+            echo "windows_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "windows_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+          if [ -f release_assets/generator ]; then
+            echo "linux_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "linux_exists=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.ref }}
-          release_name: Release ${{ github.ref }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag_name: ${{ github.ref_name }}
+          release_name: Release ${{ github.ref_name }}
           draft: false
           prerelease: false
+
       - name: Upload Windows EXE
+        if: steps.collect.outputs.windows_exists == 'true'
         uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./windows-latest-exe/app.exe  # Change 'app.exe' to your exe name
-          asset_name: app-windows.exe
+          asset_path: release_assets/generator.exe
+          asset_name: generator-windows.exe
           asset_content_type: application/octet-stream
+
       - name: Upload Linux Binary
+        if: steps.collect.outputs.linux_exists == 'true'
         uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
+          token: ${{ secrets.GITHUB_TOKEN }}
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ./ubuntu-latest-exe/app
-          asset_name: app-linux
-          asset_content_type: application/octet-stream   
+          asset_path: release_assets/generator
+          asset_name: generator-linux
+          asset_content_type: application/octet-stream
