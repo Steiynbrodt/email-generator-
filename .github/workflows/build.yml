@@ -1,32 +1,71 @@
-name: Build Executables
-on: push
+# .github/workflows/build.yml
+name: Build and Release
+
+on:
+  push:
+    tags: ['v*']  # Trigger on git tags like v1.0.0
+
 jobs:
   build:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest]
     env:
-      MAIN_PY_FILE: main.py  # Change to your main Python file
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      MAIN_PY_FILE: mail generator.py
 
+    steps:
+      - uses: actions/checkout@v4
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
-
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          
           pip install pyinstaller
-
       - name: Build executable
-        run: pyinstaller --onefile ${{ env.MAIN_PY_FILE }}
-
+        run: |
+          pyinstaller --onefile ${{ env.MAIN_PY_FILE }}
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.os }}-executable
-          path: dist/   
+          name: ${{ matrix.os }}-exe
+          path: dist/
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - name: Create Release
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.ref }}
+          release_name: Release ${{ github.ref }}
+          draft: false
+          prerelease: false
+      - name: Upload Windows EXE
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./windows-latest-exe/app.exe  # Change 'app.exe' to your exe name
+          asset_name: app-windows.exe
+          asset_content_type: application/octet-stream
+      - name: Upload Linux Binary
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./ubuntu-latest-exe/app
+          asset_name: app-linux
+          asset_content_type: application/octet-stream   
