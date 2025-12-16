@@ -1,11 +1,9 @@
+# .github/workflows/build.yml
 name: Build and Release
 
 on:
   push:
     tags: ['v*']  # Trigger on git tags like v1.0.0
-
-permissions:
-  contents: write
 
 jobs:
   build:
@@ -37,73 +35,75 @@ jobs:
   release:
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           merge-multiple: true
 
-      - name: Collect built artifacts
-        id: collect
+      - name: List workspace (for debugging)
         run: |
-          set -euo pipefail
+          echo "Workspace root: $GITHUB_WORKSPACE"
+          ls -la
+
+      - name: Prepare release assets
+        id: prepare_assets
+        run: |
+          set -e
           mkdir -p release_assets
 
-          # PyInstaller by default produces dist/<name> (Linux) and dist/<name>.exe (Windows)
-          win=$(find . -type f -path "*/dist/*.exe" -name "generator.exe" -print -quit || true)
-          if [ -n "$win" ]; then cp "$win" release_assets/generator.exe; fi
-
-          linux=$(find . -type f -path "*/dist/*" -name "generator" -print -quit || true)
-          if [ -n "$linux" ]; then cp "$linux" release_assets/generator; fi
-
-          # Fallback: any .exe or executable if not found above
-          if [ -z "$(ls -A release_assets 2>/dev/null)" ]; then
-            win2=$(find . -type f -iname "*.exe" -print -quit || true)
-            if [ -n "$win2" ]; then cp "$win2" release_assets/generator.exe || true; fi
-            bin2=$(find . -type f -perm /111 -not -iname "*.exe" -print -quit || true)
-            if [ -n "$bin2" ]; then cp "$bin2" release_assets/generator || true; fi
+          # Find first Windows exe (if any)
+          WIN_EXE=$(find . -type f -name "*.exe" -print -quit || true)
+          if [ -n "$WIN_EXE" ]; then
+            echo "Found Windows exe: $WIN_EXE"
+            cp "$WIN_EXE" release_assets/app-windows.exe
+            echo "windows_asset=release_assets/app-windows.exe" >> $GITHUB_OUTPUT
+          else
+            echo "windows_asset=" >> $GITHUB_OUTPUT
           fi
 
-          ls -la release_assets || true
-
-          if [ -f release_assets/generator.exe ]; then
-            echo "windows_exists=true" >> $GITHUB_OUTPUT
+          # Find first Linux executable in dist (exclude libraries)
+          LINUX_BIN=$(find . -type f -perm -111 -not -name "*.so" -not -name "*.dll" -not -name "*.dylib" -print -quit || true)
+          if [ -n "$LINUX_BIN" ]; then
+            echo "Found Linux binary: $LINUX_BIN"
+            cp "$LINUX_BIN" release_assets/app-linux
+            chmod +x release_assets/app-linux
+            echo "linux_asset=release_assets/app-linux" >> $GITHUB_OUTPUT
           else
-            echo "windows_exists=false" >> $GITHUB_OUTPUT
-          fi
-
-          if [ -f release_assets/generator ]; then
-            echo "linux_exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "linux_exists=false" >> $GITHUB_OUTPUT
+            echo "linux_asset=" >> $GITHUB_OUTPUT
           fi
 
       - name: Create Release
         id: create_release
         uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
           tag_name: ${{ github.ref_name }}
           release_name: Release ${{ github.ref_name }}
           draft: false
           prerelease: false
 
-      - name: Upload Windows EXE
-        if: steps.collect.outputs.windows_exists == 'true'
+      - name: Upload Windows EXE (if present)
+        if: ${{ steps.prepare_assets.outputs.windows_asset != '' }}
         uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: release_assets/generator.exe
-          asset_name: generator-windows.exe
+          asset_path: ${{ steps.prepare_assets.outputs.windows_asset }}
+          asset_name: app-windows.exe
           asset_content_type: application/octet-stream
 
-      - name: Upload Linux Binary
-        if: steps.collect.outputs.linux_exists == 'true'
+      - name: Upload Linux Binary (if present)
+        if: ${{ steps.prepare_assets.outputs.linux_asset != '' }}
         uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
           upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: release_assets/generator
-          asset_name: generator-linux
+          asset_path: ${{ steps.prepare_assets.outputs.linux_asset }}
+          asset_name: app-linux
           asset_content_type: application/octet-stream
