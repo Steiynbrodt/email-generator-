@@ -1,40 +1,40 @@
-# Drop-in manual release workflow tuned to your current artifact layout.
-# Matches behavior/asset layout of .github/workflows/build.yml (ref: dc9664545a26360973415fbcfc9ca001970949f6)
-# https://github.com/Steiynbrodt/email-generator-/blob/dc9664545a26360973415fbcfc9ca001970949f6/.github/workflows/build.yml
-
 name: Manual Build and Release
 
 on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: 'Tag to create (e.g. v1.0.0)'
+        description: "Tag to create (e.g. v1.0.0)"
         required: true
       release_name:
-        description: 'Release display name (optional)'
+        description: "Release display name (optional)"
         required: false
-        default: ''
+        default: ""
       overwrite_release:
-        description: 'If true, delete existing release with the same tag before creating (CAREFUL)'
+        description: "If true, delete existing release with the same tag before creating (CAREFUL)"
         required: false
-        default: 'true'
+        default: "true"
       draft:
-        description: 'Create release as draft? (true/false)'
+        description: "Create release as draft? (true/false)"
         required: false
-        default: 'false'
+        default: "false"
       prerelease:
-        description: 'Create release as prerelease? (true/false)'
+        description: "Create release as prerelease? (true/false)"
         required: false
-        default: 'false'
+        default: "false"
+
+permissions:
+  contents: write
 
 env:
   MAIN_PY_FILE: generator.py
 
 jobs:
   build:
-    name: Build artifacts
+    name: Build artifacts (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
 
@@ -44,126 +44,124 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install pyinstaller
 
-      - name: Build executable
+      - name: Build executable (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
         run: |
-          pyinstaller --onefile ${{ env.MAIN_PY_FILE }}
+          pyinstaller --onefile $env:MAIN_PY_FILE
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item "dist\*.exe" "out\app-windows.exe"
+
+      - name: Build executable (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          pyinstaller --onefile "$MAIN_PY_FILE"
+          mkdir -p out
+          # PyInstaller outputs "dist/<name>" where <name> is script basename
+          APP_NAME="$(basename "$MAIN_PY_FILE" .py)"
+          cp "dist/$APP_NAME" "out/app-linux"
+          chmod +x "out/app-linux"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.os }}-exe
-          path: dist/
+          name: app-${{ runner.os }}
+          path: out/
 
   release:
     name: Create Release and Upload Assets
     needs: build
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
           merge-multiple: true
+          path: ./downloaded
 
-      - name: List workspace (debug)
+      - name: List downloaded files (debug)
+        shell: bash
         run: |
-          echo "Workspace root: $GITHUB_WORKSPACE"
-          ls -la
-          # show dist contents if present
-          find . -maxdepth 3 -type f -print || true
+          set -e
+          echo "Downloaded:"
+          find ./downloaded -type f -maxdepth 2 -print
 
       - name: Prepare release assets
-        id: prepare_assets
+        shell: bash
         run: |
           set -e
           mkdir -p release_assets
 
-          # Find first Windows exe (if any)
-          WIN_EXE=$(find . -type f -name "*.exe" -print -quit || true)
-          if [ -n "$WIN_EXE" ]; then
-            echo "Found Windows exe: $WIN_EXE"
-            cp "$WIN_EXE" release_assets/app-windows.exe
-            echo "windows_asset=release_assets/app-windows.exe" >> $GITHUB_OUTPUT
-          else
-            echo "windows_asset=" >> $GITHUB_OUTPUT
+          # Copy known outputs if present
+          if [ -f "./downloaded/app-windows.exe" ]; then
+            cp "./downloaded/app-windows.exe" "release_assets/app-windows.exe"
           fi
 
-          # Find first Linux executable (executable permission, exclude libs)
-          LINUX_BIN=$(find . -type f -perm -111 -not -name "*.so" -not -name "*.dll" -not -name "*.dylib" -print -quit || true)
-          if [ -n "$LINUX_BIN" ]; then
-            echo "Found Linux binary: $LINUX_BIN"
-            cp "$LINUX_BIN" release_assets/app-linux
-            chmod +x release_assets/app-linux
-            echo "linux_asset=release_assets/app-linux" >> $GITHUB_OUTPUT
-          else
-            echo "linux_asset=" >> $GITHUB_OUTPUT
+          if [ -f "./downloaded/app-linux" ]; then
+            cp "./downloaded/app-linux" "release_assets/app-linux"
+            chmod +x "release_assets/app-linux"
           fi
+
+          echo "Prepared assets:"
+          ls -la release_assets || true
 
       - name: Delete existing release (if requested)
         if: ${{ github.event.inputs.overwrite_release == 'true' }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
           set -e
-          OWNER=${GITHUB_REPOSITORY%%/*}
-          REPO=${GITHUB_REPOSITORY#*/}
           TAG="${{ github.event.inputs.tag_name }}"
 
-          echo "Checking for existing release for tag: $TAG"
-          resp=$(curl -s -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$OWNER/$REPO/releases/tags/$TAG")
-          if echo "$resp" | grep -q '"id":'; then
-            id=$(echo "$resp" | sed -n 's/.*"id": \([0-9]*\).*/\1/p')
-            if [ -n "$id" ]; then
-              echo "Deleting release id $id for tag $TAG"
-              curl -s -X DELETE -H "Authorization: token $GITHUB_TOKEN" "https://api.github.com/repos/$OWNER/$REPO/releases/$id"
-              echo "Deleted release id $id"
-            else
-              echo "Could not parse release id, response:"
-              echo "$resp"
-              exit 1
-            fi
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Deleting existing release for tag $TAG"
+            # --cleanup-tag removes the Git tag as well
+            gh release delete "$TAG" --yes --cleanup-tag
           else
-            echo "No release exists for tag $TAG"
+            echo "No existing release for tag $TAG"
           fi
 
-      - name: Create Release
-        id: create_release
-        uses: actions/create-release@v1
+      - name: Create release + upload assets
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ github.event.inputs.tag_name }}
-          # If user provided a release_name it will be used; otherwise use "Release <tag>"
-          release_name: ${{ github.event.inputs.release_name && github.event.inputs.release_name || format('Release {0}', github.event.inputs.tag_name) }}
-          draft: ${{ github.event.inputs.draft }}
-          prerelease: ${{ github.event.inputs.prerelease }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -e
+          TAG="${{ github.event.inputs.tag_name }}"
+          TITLE_INPUT="${{ github.event.inputs.release_name }}"
+          DRAFT="${{ github.event.inputs.draft }}"
+          PRERELEASE="${{ github.event.inputs.prerelease }}"
 
-      - name: Upload Windows EXE (if present)
-        if: ${{ steps.prepare_assets.outputs.windows_asset != '' }}
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ${{ steps.prepare_assets.outputs.windows_asset }}
-          asset_name: app-windows.exe
-          asset_content_type: application/octet-stream
+          if [ -n "$TITLE_INPUT" ]; then
+            TITLE="$TITLE_INPUT"
+          else
+            TITLE="Release $TAG"
+          fi
 
-      - name: Upload Linux Binary (if present)
-        if: ${{ steps.prepare_assets.outputs.linux_asset != '' }}
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ steps.create_release.outputs.upload_url }}
-          asset_path: ${{ steps.prepare_assets.outputs.linux_asset }}
-          asset_name: app-linux
-          asset_content_type: application/octet-stream
+          FLAGS=()
+          if [ "$DRAFT" = "true" ]; then FLAGS+=(--draft); fi
+          if [ "$PRERELEASE" = "true" ]; then FLAGS+=(--prerelease); fi
+
+          # Create release and upload everything in release_assets/
+          # If the directory is empty, fail early with a clear message.
+          shopt -s nullglob
+          ASSETS=(release_assets/*)
+          if [ ${#ASSETS[@]} -eq 0 ]; then
+            echo "No assets found in release_assets/. Nothing to upload."
+            exit 1
+          fi
+
+          gh release create "$TAG" "${ASSETS[@]}" \
+            --title "$TITLE" \
+            --notes "" \
+            "${FLAGS[@]}"
