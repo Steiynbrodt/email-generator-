@@ -12,7 +12,7 @@ jobs:
       matrix:
         os: [windows-latest, ubuntu-latest]
     env:
-      MAIN_PY_FILE: mail generator.py
+      MAIN_PY_FILE: generator.py
 
     steps:
       - uses: actions/checkout@v4
