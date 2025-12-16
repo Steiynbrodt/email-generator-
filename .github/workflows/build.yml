@@ -17,7 +17,7 @@ on:
       overwrite_release:
         description: 'If true, delete existing release with the same tag before creating (CAREFUL)'
         required: false
-        default: 'false'
+        default: 'true'
       draft:
         description: 'Create release as draft? (true/false)'
         required: false
