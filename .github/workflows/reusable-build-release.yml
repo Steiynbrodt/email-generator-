@@ -81,7 +81,7 @@ jobs:
         shell: pwsh
         run: |
           $App = "${{ inputs.app_name }}"
-          pyinstaller --onefile --name "$App" "${{ inputs.main_py_file }}"
+          pyinstaller --onefile --noconsole --name "$App" "${{ inputs.main_py_file }}"
 
           if (!(Test-Path "dist\$App.exe")) {
             throw "Expected dist\$App.exe not found"
@@ -98,7 +98,7 @@ jobs:
           set -euo pipefail
           APP="${{ inputs.app_name }}"
 
-          pyinstaller --onefile --name "$APP" "${{ inputs.main_py_file }}"
+          pyinstaller  --noconsole --onefile --name "$APP" "${{ inputs.main_py_file }}"
 
           if [ ! -f "dist/$APP" ]; then
             echo "Expected dist/$APP not found"
